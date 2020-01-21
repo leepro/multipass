@@ -17,6 +17,7 @@
 
 #include <src/platform/backends/qemu/qemu_virtual_machine_factory.h>
 
+#include "tests/extra_assertions.h"
 #include "tests/mock_environment_helpers.h"
 #include "tests/mock_process_factory.h"
 #include "tests/mock_status_monitor.h"
@@ -27,6 +28,7 @@
 #include "tests/temp_file.h"
 #include "tests/test_with_mocked_bin_path.h"
 
+#include <multipass/exceptions/start_exception.h>
 #include <multipass/memory_size.h>
 #include <multipass/platform.h>
 #include <multipass/virtual_machine.h>
@@ -145,6 +147,31 @@ TEST_F(QemuBackend, throws_when_starting_while_suspending)
     machine->state = mp::VirtualMachine::State::suspending;
 
     EXPECT_THROW(machine->start(), std::runtime_error);
+}
+
+TEST_F(QemuBackend, throws_when_shutdown_while_starting)
+{
+    constexpr auto error_msg = "failing spectacularly";
+    auto factory = mpt::MockProcessFactory::Inject();
+    factory->register_callback([](mpt::MockProcess* process) {
+        if (process->program().startsWith("qemu-system-"))
+        {
+            mp::ProcessState exit_state;
+            exit_state.exit_code = 1;
+            EXPECT_CALL(*process, read_all_standard_error()).WillOnce(Return(error_msg));
+            EXPECT_CALL(*process, execute(_)).WillOnce(Return(exit_state));
+        }
+    });
+
+    NiceMock<mpt::MockVMStatusMonitor> mock_monitor;
+    mp::QemuVirtualMachineFactory backend{data_dir.path()};
+
+    auto machine = backend.create_virtual_machine(default_description, mock_monitor);
+
+    machine->state = mp::VirtualMachine::State::starting;
+    machine->shutdown();
+    MP_EXPECT_THROW_THAT(machine->ensure_vm_is_running(), mp::StartException,
+                         Property(&mp::StartException::name, Eq(machine->vm_name)));
 }
 
 TEST_F(QemuBackend, machine_unknown_state_properly_shuts_down)
